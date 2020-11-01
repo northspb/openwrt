@@ -1,0 +1,142 @@
+name: Build OpenWrt
+
+on:
+  push:
+    branches: [ ci-test ]
+  repository_dispatch:
+  workflow_dispatch:
+    inputs:
+      ssh:
+        description: 'SSH connection to Actions'
+        required: false
+        default: 'false'
+#  schedule:
+#    - cron: 0 8 * * 5
+
+env:
+  FEEDS_CONF: feeds.conf.default
+  CONFIG_FILE: config_xiaomi_lumi
+  UPLOAD_BIN_DIR: true
+  UPLOAD_FIRMWARE: true
+  UPLOAD_COWTRANSFER: false
+  UPLOAD_WETRANSFER: false
+  UPLOAD_RELEASE: true
+  lumi: xiaomi_lumi
+  TZ: Europe/Moscow
+
+jobs:
+  build:
+    runs-on: ubuntu-16.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@main
+
+      - name: Cache toolchain
+        uses: actions/cache@v2
+        with:
+          path: |
+            build_dir/toolchain*
+            staging_dir/toolchain*
+            build_dir/host*
+            staging_dir/host*
+          key: toolchain-${{ hashFiles('toolchain') }}${{ secrets.CACHE_VERSION }}
+
+      - name: Cache target
+        uses: actions/cache@v2
+        with:
+          path: |
+            build_dir/target*
+            staging_dir/target*
+          key: target-${{ hashFiles('config_xiaomi_lumi', 'feeds.conf.default') }}${{ secrets.CACHE_VERSION }}
+
+      - name: Prepare data and clean worker
+        run: |
+          df -hT /
+          sudo rm -rf /usr/share/dotnet/ || true
+          sudo rm -rf /usr/share/swift/ || true
+          sudo rm -rf /usr/local/lib/android/ || true
+          df -hT /
+          ln -sf $GITHUB_WORKSPACE/files $GITHUB_WORKSPACE/files_xiaomi_lumi
+
+      - name: SSH connection to Actions
+        uses: P3TERX/ssh2actions@v1.0.0
+        if: (github.event.inputs.ssh == 'true' && github.event.inputs.ssh  != 'false') || contains(github.event.action, 'ssh')
+        env:
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+
+      - name: Compile the firmware
+        id: compile
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+          rm -f .config
+          cp ${{ env.CONFIG_FILE }} .config
+          make defconfig
+          make -j$(($(nproc)+1)) IGNORE_ERRORS='m n y'
+
+          grep '^CONFIG_TARGET.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
+          [ -s DEVICE_NAME ] && echo "DEVICE_NAME=${DEVICE_NAME}" >> $GITHUB_ENV
+          echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
+
+      - name: Check space usage
+        if: (!cancelled())
+        run: df -hT
+
+      - name: Upload bin directory
+        uses: actions/upload-artifact@main
+        if: steps.compile.outputs.status == 'success' && env.UPLOAD_BIN_DIR == 'true'
+        with:
+          name: OpenWrt_bin${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
+          path: $GITHUB_WORKSPACE/bin/**/*
+
+      - name: Organize files
+        id: organize
+        if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
+        run: |
+          cd $GITHUB_WORKSPACE/bin/targets/*/*
+          rm -rf packages
+          echo "FIRMWARE=$PWD" >> $GITHUB_ENV
+          echo "::set-output name=status::success"
+
+      - name: Upload firmware directory
+        uses: actions/upload-artifact@main
+        if: steps.organize.outputs.status == 'success' && !cancelled()
+        with:
+          name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
+          path: ${{ env.FIRMWARE }}
+
+      - name: Generate release tag
+        id: tag
+        if: env.UPLOAD_RELEASE == 'true' && !cancelled()
+        run: |
+          echo "::set-output name=release_tag::$(date +"%Y%m%d-%H%M")$GITHUB_REF"
+          touch release.txt
+          echo "::set-output name=status::success"
+
+      - name: Upload firmware to release
+        uses: softprops/action-gh-release@v1
+        if: steps.tag.outputs.status == 'success' && !cancelled()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ steps.tag.outputs.release_tag }}
+          body_path: release.txt
+          files: ${{ env.FIRMWARE }}/*
+          prerelease: true
+
+      - name: Remove old Artifacts
+        uses: c-hive/gha-remove-artifacts@v1.2.0
+        with:
+          age: '1 day'
+          skip-recent: 3
+
+#      - name: Remove old Releases
+#        uses: dev-drprasad/delete-older-releases@v0.1.0
+#        if: env.UPLOAD_RELEASE == 'true' && !cancelled()
+#        with:
+#          keep_latest: 3
+#          delete_tags: true
+#        env:
+#          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
