@@ -57,7 +57,7 @@ jobs:
           sudo rm -rf /usr/share/swift/ || true
           sudo rm -rf /usr/local/lib/android/ || true
           df -hT /
-          ln -sf $GITHUB_WORKSPACE/files $GITHUB_WORKSPACE/files_xiaomi_lumi
+          ln -sf $GITHUB_WORKSPACE/files_xiaomi_lumi $GITHUB_WORKSPACE/files
 
       - name: SSH connection to Actions
         uses: P3TERX/ssh2actions@v1.0.0
